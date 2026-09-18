@@ -1,579 +1,336 @@
 using System;
 using System.Collections.Generic;
-using System.Drawing;
+using System.IO;
 using System.Linq;
-using System.Windows.Forms;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 
 namespace MfaE2ee
 {
-    public class MainForm : Form
+    // Domain models
+    public class MfaAccount
     {
-        private const string VaultPath = "mfa_vault.json";
-        private MfaService _service;
+        public string Id { get; set; } = Guid.NewGuid().ToString("N");
+        public string Name { get; set; } = "";
+        public string Issuer { get; set; } = "";
+        public string EncryptedSecret { get; set; } = "";
+        public string SecretNonce { get; set; } = "";
+        public string SecretTag { get; set; } = "";
+        public int Digits { get; set; } = 6;
+        public int PeriodSeconds { get; set; } = 30;
+    }
 
-        // Wizard controls
-        private Panel _wizardPanel;
-        private Label _wizardTitle;
-        private Label _lblPassword;
-        private TextBox _txtPassword;
-        private Label _lblConfirm;
-        private TextBox _txtConfirm;
-        private Button _btnWizardNext;
-        private Label _wizardStep2Title;
-        private Label _lblName;
-        private TextBox _txtName;
-        private Label _lblIssuer;
-        private TextBox _txtIssuer;
-        private Label _lblSecret;
-        private TextBox _txtSecret;
-        private Button _btnFinish;
-        private Label _lblWizardError;
+    public class EncryptedVault
+    {
+        public List<MfaAccount> Accounts { get; set; } = new List<MfaAccount>();
+        public string Salt { get; set; } = "";
+        public string BackupCodesBlob { get; set; } = "";
+        public string BackupCodesNonce { get; set; } = "";
+        public string BackupCodesTag { get; set; } = "";
+    }
 
-        // Main dashboard controls
-        private Panel _mainPanel;
-        private ListBox _lstAccounts;
-        private Button _btnGenerate;
-        private Button _btnBackups;
-        private Button _btnAddAccount;
-        private Button _btnDeleteAccount;
-        private Button _btnLock;
-        private Label _lblStatus;
+    public class BackupCodeSet
+    {
+        public string AccountId { get; set; } = "";
+        public List<string> Codes { get; set; } = new List<string>();
+    }
 
-        public MainForm()
+    // Cryptographic helpers: AES-256-GCM (best-effort cross-platform using AesGcm on .NET 5+)
+    public static class Crypto
+    {
+        public const int KeySize = 32;
+        public const int NonceSize = 12;
+        public const int TagSize = 16;
+        public const int SaltSize = 32;
+
+        public static byte[] GenerateRandom(int bytes)
         {
-            Text = "AuthMate - Encrypted MFA";
-            Size = new Size(520, 420);
-            StartPosition = FormStartPosition.CenterScreen;
-            FormBorderStyle = FormBorderStyle.FixedSingle;
-            MaximizeBox = false;
-
-            _service = new MfaService(VaultPath);
-            InitializeWizard();
-            InitializeDashboard();
-
-            Shown += MainForm_Shown;
+            byte[] data = new byte[bytes];
+            RandomNumberGenerator.Fill(data);
+            return data;
         }
 
-        private void InitializeWizard()
+        public static byte[] DeriveKey(string password, byte[] salt)
         {
-            _wizardPanel = new Panel();
-            _wizardPanel.Dock = DockStyle.Fill;
-            _wizardPanel.Padding = new Padding(20);
-
-            _wizardTitle = new Label();
-            _wizardTitle.Text = "Welcome to AuthMate";
-            _wizardTitle.Font = new Font(_wizardTitle.Font.FontFamily, 14, FontStyle.Bold);
-            _wizardTitle.AutoSize = true;
-            _wizardTitle.Location = new Point(20, 20);
-
-            _lblPassword = new Label();
-            _lblPassword.Text = "Create vault password:";
-            _lblPassword.AutoSize = true;
-            _lblPassword.Location = new Point(20, 70);
-
-            _txtPassword = new TextBox();
-            _txtPassword.PasswordChar = '*';
-            _txtPassword.Width = 300;
-            _txtPassword.Location = new Point(20, 95);
-
-            _lblConfirm = new Label();
-            _lblConfirm.Text = "Confirm password:";
-            _lblConfirm.AutoSize = true;
-            _lblConfirm.Location = new Point(20, 135);
-
-            _txtConfirm = new TextBox();
-            _txtConfirm.PasswordChar = '*';
-            _txtConfirm.Width = 300;
-            _txtConfirm.Location = new Point(20, 160);
-
-            _btnWizardNext = new Button();
-            _btnWizardNext.Text = "Next";
-            _btnWizardNext.Width = 100;
-            _btnWizardNext.Location = new Point(20, 200);
-            _btnWizardNext.Click += BtnWizardNext_Click;
-
-            _wizardStep2Title = new Label();
-            _wizardStep2Title.Text = "Add your first account";
-            _wizardStep2Title.Font = new Font(_wizardStep2Title.Font.FontFamily, 12, FontStyle.Bold);
-            _wizardStep2Title.AutoSize = true;
-            _wizardStep2Title.Location = new Point(20, 20);
-            _wizardStep2Title.Visible = false;
-
-            _lblName = new Label();
-            _lblName.Text = "Account name:";
-            _lblName.AutoSize = true;
-            _lblName.Location = new Point(20, 70);
-            _lblName.Visible = false;
-
-            _txtName = new TextBox();
-            _txtName.Width = 300;
-            _txtName.Location = new Point(20, 95);
-            _txtName.Visible = false;
-
-            _lblIssuer = new Label();
-            _lblIssuer.Text = "Issuer:";
-            _lblIssuer.AutoSize = true;
-            _lblIssuer.Location = new Point(20, 135);
-            _lblIssuer.Visible = false;
-
-            _txtIssuer = new TextBox();
-            _txtIssuer.Width = 300;
-            _txtIssuer.Location = new Point(20, 160);
-            _txtIssuer.Visible = false;
-
-            _lblSecret = new Label();
-            _lblSecret.Text = "Base32 secret:";
-            _lblSecret.AutoSize = true;
-            _lblSecret.Location = new Point(20, 200);
-            _lblSecret.Visible = false;
-
-            _txtSecret = new TextBox();
-            _txtSecret.Width = 400;
-            _txtSecret.Location = new Point(20, 225);
-            _txtSecret.Visible = false;
-
-            _btnFinish = new Button();
-            _btnFinish.Text = "Finish";
-            _btnFinish.Width = 100;
-            _btnFinish.Location = new Point(20, 270);
-            _btnFinish.Click += BtnFinish_Click;
-            _btnFinish.Visible = false;
-
-            _lblWizardError = new Label();
-            _lblWizardError.ForeColor = Color.Red;
-            _lblWizardError.AutoSize = true;
-            _lblWizardError.Location = new Point(20, 320);
-
-            _wizardPanel.Controls.Add(_wizardTitle);
-            _wizardPanel.Controls.Add(_lblPassword);
-            _wizardPanel.Controls.Add(_txtPassword);
-            _wizardPanel.Controls.Add(_lblConfirm);
-            _wizardPanel.Controls.Add(_txtConfirm);
-            _wizardPanel.Controls.Add(_btnWizardNext);
-            _wizardPanel.Controls.Add(_wizardStep2Title);
-            _wizardPanel.Controls.Add(_lblName);
-            _wizardPanel.Controls.Add(_txtName);
-            _wizardPanel.Controls.Add(_lblIssuer);
-            _wizardPanel.Controls.Add(_txtIssuer);
-            _wizardPanel.Controls.Add(_lblSecret);
-            _wizardPanel.Controls.Add(_txtSecret);
-            _wizardPanel.Controls.Add(_btnFinish);
-            _wizardPanel.Controls.Add(_lblWizardError);
-
-            Controls.Add(_wizardPanel);
-        }
-
-        private void InitializeDashboard()
-        {
-            _mainPanel = new Panel();
-            _mainPanel.Dock = DockStyle.Fill;
-            _mainPanel.Padding = new Padding(10);
-            _mainPanel.Visible = false;
-
-            Label title = new Label();
-            title.Text = "AuthMate Dashboard";
-            title.Font = new Font(title.Font.FontFamily, 14, FontStyle.Bold);
-            title.AutoSize = true;
-            title.Location = new Point(10, 10);
-
-            _lstAccounts = new ListBox();
-            _lstAccounts.Location = new Point(10, 50);
-            _lstAccounts.Size = new Size(350, 220);
-            _lstAccounts.DisplayMember = "DisplayText";
-            _lstAccounts.ValueMember = "Id";
-
-            _btnGenerate = new Button();
-            _btnGenerate.Text = "Generate TOTP";
-            _btnGenerate.Width = 120;
-            _btnGenerate.Location = new Point(380, 50);
-            _btnGenerate.Click += BtnGenerate_Click;
-
-            _btnBackups = new Button();
-            _btnBackups.Text = "View Backups";
-            _btnBackups.Width = 120;
-            _btnBackups.Location = new Point(380, 90);
-            _btnBackups.Click += BtnBackups_Click;
-
-            _btnAddAccount = new Button();
-            _btnAddAccount.Text = "Add Account";
-            _btnAddAccount.Width = 120;
-            _btnAddAccount.Location = new Point(380, 140);
-            _btnAddAccount.Click += BtnAddAccount_Click;
-
-            _btnDeleteAccount = new Button();
-            _btnDeleteAccount.Text = "Delete";
-            _btnDeleteAccount.Width = 120;
-            _btnDeleteAccount.Location = new Point(380, 180);
-            _btnDeleteAccount.Click += BtnDeleteAccount_Click;
-
-            _btnLock = new Button();
-            _btnLock.Text = "Lock Vault";
-            _btnLock.Width = 120;
-            _btnLock.Location = new Point(380, 230);
-            _btnLock.Click += BtnLock_Click;
-
-            _lblStatus = new Label();
-            _lblStatus.Text = "Vault unlocked.";
-            _lblStatus.AutoSize = true;
-            _lblStatus.Location = new Point(10, 290);
-
-            _mainPanel.Controls.Add(title);
-            _mainPanel.Controls.Add(_lstAccounts);
-            _mainPanel.Controls.Add(_btnGenerate);
-            _mainPanel.Controls.Add(_btnBackups);
-            _mainPanel.Controls.Add(_btnAddAccount);
-            _mainPanel.Controls.Add(_btnDeleteAccount);
-            _mainPanel.Controls.Add(_btnLock);
-            _mainPanel.Controls.Add(_lblStatus);
-
-            Controls.Add(_mainPanel);
-        }
-
-        private void MainForm_Shown(object sender, EventArgs e)
-        {
-            if (!_service.VaultExists)
+            using (Rfc2898DeriveBytes pbkdf2 = new Rfc2898DeriveBytes(password, salt, 100000, HashAlgorithmName.SHA256))
             {
-                ShowWizard(true);
-            }
-            else
-            {
-                ShowLogin();
+                return pbkdf2.GetBytes(KeySize);
             }
         }
 
-        private void ShowLogin()
+        public static bool AesGcmSupported()
         {
-            using (LoginForm login = new LoginForm())
-            {
-                if (login.ShowDialog(this) != DialogResult.OK)
-                {
-                    Close();
-                    return;
-                }
-                if (!_service.TryUnlock(login.Password))
-                {
-                    MessageBox.Show(this, "Incorrect password.", "Unlock Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    ShowLogin();
-                    return;
-                }
-            }
-            ShowDashboard();
-        }
-
-        private void ShowWizard(bool firstRun)
-        {
-            _wizardPanel.Visible = true;
-            _mainPanel.Visible = false;
-            _wizardTitle.Visible = true;
-            _lblPassword.Visible = true;
-            _txtPassword.Visible = true;
-            _lblConfirm.Visible = true;
-            _txtConfirm.Visible = true;
-            _btnWizardNext.Visible = true;
-            _wizardStep2Title.Visible = false;
-            _lblName.Visible = false;
-            _txtName.Visible = false;
-            _lblIssuer.Visible = false;
-            _txtIssuer.Visible = false;
-            _lblSecret.Visible = false;
-            _txtSecret.Visible = false;
-            _btnFinish.Visible = false;
-            _lblWizardError.Text = "";
-            _btnWizardNext.Tag = firstRun;
-        }
-
-        private void BtnWizardNext_Click(object sender, EventArgs e)
-        {
-            _lblWizardError.Text = "";
-            if (_txtPassword.Text.Length < 8)
-            {
-                _lblWizardError.Text = "Password must be at least 8 characters.";
-                return;
-            }
-            if (_txtPassword.Text != _txtConfirm.Text)
-            {
-                _lblWizardError.Text = "Passwords do not match.";
-                return;
-            }
-
-            _wizardTitle.Visible = false;
-            _lblPassword.Visible = false;
-            _txtPassword.Visible = false;
-            _lblConfirm.Visible = false;
-            _txtConfirm.Visible = false;
-            _btnWizardNext.Visible = false;
-
-            _wizardStep2Title.Visible = true;
-            _lblName.Visible = true;
-            _txtName.Visible = true;
-            _lblIssuer.Visible = true;
-            _txtIssuer.Visible = true;
-            _lblSecret.Visible = true;
-            _txtSecret.Visible = true;
-            _btnFinish.Visible = true;
-        }
-
-        private void BtnFinish_Click(object sender, EventArgs e)
-        {
-            _lblWizardError.Text = "";
-            if (string.IsNullOrWhiteSpace(_txtName.Text) ||
-                string.IsNullOrWhiteSpace(_txtIssuer.Text) ||
-                string.IsNullOrWhiteSpace(_txtSecret.Text))
-            {
-                _lblWizardError.Text = "Please fill in all fields.";
-                return;
-            }
-
             try
             {
-                _service.CreateVault(_txtPassword.Text);
-                _service.AddAccount(_txtName.Text.Trim(), _txtIssuer.Text.Trim(), _txtSecret.Text.Trim().Replace(" ", ""), 6, 30);
-                ShowDashboard();
-            }
-            catch (Exception ex)
-            {
-                _lblWizardError.Text = "Error: " + ex.Message;
-            }
-        }
-
-        private void ShowDashboard()
-        {
-            _wizardPanel.Visible = false;
-            _mainPanel.Visible = true;
-            RefreshAccountList();
-        }
-
-        private void RefreshAccountList()
-        {
-            _lstAccounts.Items.Clear();
-            List<MfaAccount> accounts = _service.ListAccounts();
-            foreach (MfaAccount account in accounts)
-            {
-                _lstAccounts.Items.Add(new AccountItem(account));
-            }
-            if (_lstAccounts.Items.Count > 0)
-                _lstAccounts.SelectedIndex = 0;
-        }
-
-        private MfaAccount GetSelectedAccount()
-        {
-            AccountItem item = _lstAccounts.SelectedItem as AccountItem;
-            if (item == null)
-                return null;
-            return item.Account;
-        }
-
-        private void BtnGenerate_Click(object sender, EventArgs e)
-        {
-            MfaAccount account = GetSelectedAccount();
-            if (account == null)
-            {
-                MessageBox.Show(this, "Select an account first.", "Generate", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
-            try
-            {
-                string code = _service.GenerateCode(account.Id, null);
-                MessageBox.Show(this, string.Format("Current TOTP for {0}: {1}", account.Name, code), "TOTP Code", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        private void BtnBackups_Click(object sender, EventArgs e)
-        {
-            MfaAccount account = GetSelectedAccount();
-            if (account == null)
-            {
-                MessageBox.Show(this, "Select an account first.", "Backups", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
-            try
-            {
-                List<string> codes = _service.GetBackupCodes(account.Id);
-                string text = codes.Count == 0 ? "No backup codes found." : string.Join(Environment.NewLine, codes);
-                MessageBox.Show(this, text, string.Format("Backup codes for {0}", account.Name), MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        private void BtnAddAccount_Click(object sender, EventArgs e)
-        {
-            using (AddAccountForm dlg = new AddAccountForm())
-            {
-                if (dlg.ShowDialog(this) != DialogResult.OK)
-                    return;
-                try
+                using (AesGcm aes = new AesGcm(new byte[KeySize]))
                 {
-                    _service.AddAccount(dlg.AccountName, dlg.Issuer, dlg.Secret.Replace(" ", ""), 6, 30);
-                    RefreshAccountList();
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show(this, ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return true;
                 }
             }
-        }
-
-        private void BtnDeleteAccount_Click(object sender, EventArgs e)
-        {
-            MfaAccount account = GetSelectedAccount();
-            if (account == null)
-                return;
-            DialogResult result = MessageBox.Show(this, string.Format("Delete account '{0}'?", account.Name), "Confirm", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-            if (result != DialogResult.Yes)
-                return;
-            try
+            catch
             {
-                _service.DeleteAccount(account.Id);
-                RefreshAccountList();
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
             }
         }
 
-        private void BtnLock_Click(object sender, EventArgs e)
+        public static void Encrypt(byte[] key, byte[] plaintext, out byte[] cipher, out byte[] nonce, out byte[] tag)
         {
-            _service = new MfaService(VaultPath);
-            _mainPanel.Visible = false;
-            ShowLogin();
+            if (!AesGcmSupported())
+                throw new PlatformNotSupportedException("AES-GCM is not available on this runtime. Use Windows with .NET 5+ or a compatible platform.");
+
+            nonce = GenerateRandom(NonceSize);
+            tag = new byte[TagSize];
+            cipher = new byte[plaintext.Length];
+
+            using (AesGcm aes = new AesGcm(key))
+            {
+                aes.Encrypt(nonce, plaintext, cipher, tag);
+            }
         }
 
-        private class AccountItem
+        public static byte[] Decrypt(byte[] key, byte[] cipher, byte[] nonce, byte[] tag)
         {
-            public MfaAccount Account { get; private set; }
-            public string DisplayText { get; private set; }
+            if (!AesGcmSupported())
+                throw new PlatformNotSupportedException("AES-GCM is not available on this runtime.");
 
-            public AccountItem(MfaAccount account)
+            byte[] plaintext = new byte[cipher.Length];
+            using (AesGcm aes = new AesGcm(key))
             {
-                Account = account;
-                DisplayText = string.Format("{0} ({1})", account.Name, account.Issuer);
+                aes.Decrypt(nonce, cipher, tag, plaintext);
             }
+            return plaintext;
         }
     }
 
-    public class LoginForm : Form
+    // RFC 6238 TOTP implementation
+    public static class Totp
     {
-        public string Password { get; private set; }
-
-        public LoginForm()
+        public static string GenerateCode(byte[] secret, int digits, int period, long timestamp)
         {
-            Text = "Unlock Vault";
-            Size = new Size(360, 160);
-            StartPosition = FormStartPosition.CenterParent;
-            FormBorderStyle = FormBorderStyle.FixedDialog;
-            MaximizeBox = false;
-            MinimizeBox = false;
+            long counter = timestamp / period;
+            byte[] counterBytes = BitConverter.GetBytes(counter);
+            if (BitConverter.IsLittleEndian)
+                Array.Reverse(counterBytes);
 
-            Label lbl = new Label();
-            lbl.Text = "Enter vault password:";
-            lbl.AutoSize = true;
-            lbl.Location = new Point(10, 10);
+            byte[] key = Base32Decode(secret);
+            using (HMACSHA1 hmac = new HMACSHA1(key))
+            {
+                byte[] hash = hmac.ComputeHash(counterBytes);
 
-            TextBox txt = new TextBox();
-            txt.PasswordChar = '*';
-            txt.Width = 320;
-            txt.Location = new Point(10, 35);
+                int offset = hash[hash.Length - 1] & 0x0F;
+                int binary = ((hash[offset] & 0x7F) << 24)
+                           | ((hash[offset + 1] & 0xFF) << 16)
+                           | ((hash[offset + 2] & 0xFF) << 8)
+                           | (hash[offset + 3] & 0xFF);
 
-            Button ok = new Button();
-            ok.Text = "Unlock";
-            ok.DialogResult = DialogResult.OK;
-            ok.Location = new Point(10, 70);
+                int code = binary % (int)Math.Pow(10, digits);
+                return code.ToString().PadLeft(digits, '0');
+            }
+        }
 
-            Button cancel = new Button();
-            cancel.Text = "Cancel";
-            cancel.DialogResult = DialogResult.Cancel;
-            cancel.Location = new Point(100, 70);
+        public static byte[] Base32Decode(byte[] base32)
+        {
+            const string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+            List<bool> bits = new List<bool>();
+            foreach (byte b in base32)
+            {
+                char c = (char)b;
+                if (c == '=')
+                    continue;
+                int index = alphabet.IndexOf(char.ToUpperInvariant(c));
+                if (index < 0)
+                    throw new FormatException("Invalid Base32 character: " + c);
+                for (int i = 4; i >= 0; i--)
+                    bits.Add((index & (1 << i)) != 0);
+            }
 
-            AcceptButton = ok;
-            CancelButton = cancel;
-
-            ok.Click += (sender, e) => { Password = txt.Text; };
-
-            Controls.Add(lbl);
-            Controls.Add(txt);
-            Controls.Add(ok);
-            Controls.Add(cancel);
+            List<byte> bytes = new List<byte>();
+            for (int i = 0; i < bits.Count; i += 8)
+            {
+                if (i + 8 > bits.Count)
+                    break;
+                byte value = 0;
+                for (int j = 0; j < 8; j++)
+                    value = (byte)((value << 1) | (bits[i + j] ? 1 : 0));
+                bytes.Add(value);
+            }
+            return bytes.ToArray();
         }
     }
 
-    public class AddAccountForm : Form
+    public class MfaService
     {
-        public string AccountName { get; private set; }
-        public string Issuer { get; private set; }
-        public string Secret { get; private set; }
+        private readonly string _vaultPath;
+        private EncryptedVault _vault;
+        private byte[] _key;
 
-        public AddAccountForm()
+        public MfaService(string vaultPath)
         {
-            Text = "Add Account";
-            Size = new Size(420, 240);
-            StartPosition = FormStartPosition.CenterParent;
-            FormBorderStyle = FormBorderStyle.FixedDialog;
-            MaximizeBox = false;
-            MinimizeBox = false;
+            _vaultPath = vaultPath;
+            _vault = new EncryptedVault();
+        }
 
-            Label lblName = new Label();
-            lblName.Text = "Account name:";
-            lblName.AutoSize = true;
-            lblName.Location = new Point(10, 10);
+        public bool VaultExists
+        {
+            get { return File.Exists(_vaultPath); }
+        }
 
-            TextBox txtName = new TextBox();
-            txtName.Width = 370;
-            txtName.Location = new Point(10, 30);
+        public bool IsUnlocked
+        {
+            get { return _key != null; }
+        }
 
-            Label lblIssuer = new Label();
-            lblIssuer.Text = "Issuer:";
-            lblIssuer.AutoSize = true;
-            lblIssuer.Location = new Point(10, 60);
+        public void CreateVault(string password)
+        {
+            byte[] salt = Crypto.GenerateRandom(Crypto.SaltSize);
+            _key = Crypto.DeriveKey(password, salt);
+            _vault = new EncryptedVault { Salt = Convert.ToBase64String(salt) };
+            Save();
+        }
 
-            TextBox txtIssuer = new TextBox();
-            txtIssuer.Width = 370;
-            txtIssuer.Location = new Point(10, 80);
-
-            Label lblSecret = new Label();
-            lblSecret.Text = "Base32 secret:";
-            lblSecret.AutoSize = true;
-            lblSecret.Location = new Point(10, 110);
-
-            TextBox txtSecret = new TextBox();
-            txtSecret.Width = 370;
-            txtSecret.Location = new Point(10, 130);
-
-            Button ok = new Button();
-            ok.Text = "Add";
-            ok.DialogResult = DialogResult.OK;
-            ok.Location = new Point(10, 170);
-
-            Button cancel = new Button();
-            cancel.Text = "Cancel";
-            cancel.DialogResult = DialogResult.Cancel;
-            cancel.Location = new Point(100, 170);
-
-            AcceptButton = ok;
-            CancelButton = cancel;
-
-            ok.Click += (sender, e) =>
+        public bool TryUnlock(string password)
+        {
+            if (!VaultExists)
+                return false;
+            try
             {
-                AccountName = txtName.Text.Trim();
-                Issuer = txtIssuer.Text.Trim();
-                Secret = txtSecret.Text.Trim();
+                string json = File.ReadAllText(_vaultPath);
+                _vault = JsonSerializer.Deserialize<EncryptedVault>(json);
+                byte[] salt = Convert.FromBase64String(_vault.Salt);
+                _key = Crypto.DeriveKey(password, salt);
+
+                if (!string.IsNullOrEmpty(_vault.BackupCodesBlob))
+                {
+                    DecryptBackupCodes();
+                }
+                return true;
+            }
+            catch
+            {
+                _key = null;
+                return false;
+            }
+        }
+
+        public void Unlock(string password)
+        {
+            if (!TryUnlock(password))
+                throw new InvalidOperationException("Vault does not exist or password is incorrect.");
+        }
+
+        public void Save()
+        {
+            string json = JsonSerializer.Serialize(_vault, new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(_vaultPath, json);
+        }
+
+        public void AddAccount(string name, string issuer, string base32Secret, int digits, int period)
+        {
+            EnsureUnlocked();
+            byte[] secretBytes = Encoding.UTF8.GetBytes(base32Secret);
+            byte[] cipher;
+            byte[] nonce;
+            byte[] tag;
+            Crypto.Encrypt(_key, secretBytes, out cipher, out nonce, out tag);
+
+            MfaAccount account = new MfaAccount
+            {
+                Name = name,
+                Issuer = issuer,
+                EncryptedSecret = Convert.ToBase64String(cipher),
+                SecretNonce = Convert.ToBase64String(nonce),
+                SecretTag = Convert.ToBase64String(tag),
+                Digits = digits,
+                PeriodSeconds = period
             };
 
-            Controls.Add(lblName);
-            Controls.Add(txtName);
-            Controls.Add(lblIssuer);
-            Controls.Add(txtIssuer);
-            Controls.Add(lblSecret);
-            Controls.Add(txtSecret);
-            Controls.Add(ok);
-            Controls.Add(cancel);
+            GenerateAndEncryptBackupCodes(account.Id);
+            _vault.Accounts.Add(account);
+            Save();
+        }
+
+        public void DeleteAccount(string id)
+        {
+            EnsureUnlocked();
+            _vault.Accounts.RemoveAll(a => a.Id == id);
+            Save();
+        }
+
+        public List<MfaAccount> ListAccounts()
+        {
+            EnsureUnlocked();
+            return _vault.Accounts.ToList();
+        }
+
+        public string GenerateCode(string accountId, long? timestamp)
+        {
+            EnsureUnlocked();
+            MfaAccount account = _vault.Accounts.FirstOrDefault(a => a.Id == accountId);
+            if (account == null)
+                throw new ArgumentException("Account not found.");
+
+            byte[] cipher = Convert.FromBase64String(account.EncryptedSecret);
+            byte[] nonce = Convert.FromBase64String(account.SecretNonce);
+            byte[] tag = Convert.FromBase64String(account.SecretTag);
+            byte[] secretBytes = Crypto.Decrypt(_key, cipher, nonce, tag);
+
+            long ts = timestamp ?? DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            return Totp.GenerateCode(secretBytes, account.Digits, account.PeriodSeconds, ts);
+        }
+
+        public List<string> GetBackupCodes(string accountId)
+        {
+            EnsureUnlocked();
+            List<BackupCodeSet> sets = DecryptBackupCodes();
+            BackupCodeSet set = sets.FirstOrDefault(s => s.AccountId == accountId);
+            if (set == null)
+                return new List<string>();
+            return set.Codes.ToList();
+        }
+
+        private void GenerateAndEncryptBackupCodes(string accountId)
+        {
+            List<BackupCodeSet> sets = string.IsNullOrEmpty(_vault.BackupCodesBlob)
+                ? new List<BackupCodeSet>()
+                : DecryptBackupCodes();
+
+            List<string> codes = new List<string>();
+            for (int i = 0; i < 10; i++)
+            {
+                byte[] bytes = Crypto.GenerateRandom(4);
+                uint val = BitConverter.ToUInt32(bytes, 0);
+                codes.Add(val.ToString("D8"));
+            }
+            sets.Add(new BackupCodeSet { AccountId = accountId, Codes = codes });
+            EncryptBackupCodes(sets);
+        }
+
+        private List<BackupCodeSet> DecryptBackupCodes()
+        {
+            byte[] cipher = Convert.FromBase64String(_vault.BackupCodesBlob);
+            byte[] nonce = Convert.FromBase64String(_vault.BackupCodesNonce);
+            byte[] tag = Convert.FromBase64String(_vault.BackupCodesTag);
+            byte[] json = Crypto.Decrypt(_key, cipher, nonce, tag);
+            return JsonSerializer.Deserialize<List<BackupCodeSet>>(Encoding.UTF8.GetString(json));
+        }
+
+        private void EncryptBackupCodes(List<BackupCodeSet> sets)
+        {
+            byte[] json = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(sets));
+            byte[] cipher;
+            byte[] nonce;
+            byte[] tag;
+            Crypto.Encrypt(_key, json, out cipher, out nonce, out tag);
+            _vault.BackupCodesBlob = Convert.ToBase64String(cipher);
+            _vault.BackupCodesNonce = Convert.ToBase64String(nonce);
+            _vault.BackupCodesTag = Convert.ToBase64String(tag);
+        }
+
+        private void EnsureUnlocked()
+        {
+            if (_key == null)
+                throw new InvalidOperationException("Vault is locked. Unlock it first.");
         }
     }
 }
